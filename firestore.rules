@@ -1,0 +1,105 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: batches
+    // Document ID: batchId
+    // Fields:
+    //   - id: string (required) - unique identifier
+    //   - name: string (required, 1-100 chars) - batch name
+    //   - matingDate: string (required, YYYY-MM-DD format) - mating date
+    //   - createdAt: number (required) - creation timestamp
+    //   - uid: string (required) - owner's user ID
+    //
+    // Collection: tasks
+    // Document ID: taskId
+    // Fields:
+    //   - id: string (required) - unique identifier
+    //   - batchId: string (required) - parent batch ID
+    //   - batchName: string (required) - parent batch name
+    //   - title: string (required, 1-200 chars) - task title
+    //   - date: string (required, YYYY-MM-DD format) - task date
+    //   - completed: bool (required) - completion status
+    //   - type: string (optional) - task type
+    //   - cycle: number (optional) - cycle number
+    //   - daysOffset: number (optional) - offset in days
+    //   - uid: string (required) - owner's user ID
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isDocOwner() {
+      return isAuthenticated() && request.auth.uid == resource.data.uid;
+    }
+
+    function uidUnchanged() {
+      return !('uid' in request.resource.data) || request.resource.data.uid == request.auth.uid;
+    }
+
+    function uidNotModified() {
+      return !('uid' in request.resource.data) || request.resource.data.uid == resource.data.uid;
+    }
+
+    function isValidDateString(dateStr) {
+      return dateStr is string && dateStr.matches("^\\d{4}-\\d{2}-\\d{2}$");
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+    function isValidBatch(data) {
+      return data.keys().hasAll(['id', 'name', 'matingDate', 'createdAt', 'uid']) &&
+             data.id is string &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+             isValidDateString(data.matingDate) &&
+             data.createdAt is number &&
+             data.uid is string && data.uid == request.auth.uid;
+    }
+
+    function isValidTask(data) {
+      return data.keys().hasAll(['id', 'batchId', 'title', 'date', 'completed', 'uid']) &&
+             data.id is string &&
+             data.batchId is string &&
+             data.title is string && data.title.size() > 0 && data.title.size() <= 200 &&
+             isValidDateString(data.date) &&
+             data.completed is bool &&
+             data.uid is string && data.uid == request.auth.uid;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /batches/{batchId} {
+      allow read: if isDocOwner();
+      allow create: if isAuthenticated() && isValidBatch(request.resource.data);
+      allow update: if isDocOwner() && isValidBatch(request.resource.data) && uidNotModified();
+      allow delete: if isDocOwner();
+    }
+
+    match /tasks/{taskId} {
+      allow read: if isDocOwner();
+      allow create: if isAuthenticated() && isValidTask(request.resource.data);
+      allow update: if isDocOwner() && isValidTask(request.resource.data) && uidNotModified();
+      allow delete: if isDocOwner();
+    }
+    
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

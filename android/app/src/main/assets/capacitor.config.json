@@ -1,0 +1,8 @@
+{
+	"appId": "com.rabbitfarm.manager",
+	"appName": "兔场日程管理",
+	"webDir": "dist",
+	"server": {
+		"androidScheme": "https"
+	}
+}

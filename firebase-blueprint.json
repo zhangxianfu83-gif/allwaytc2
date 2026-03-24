@@ -1,0 +1,45 @@
+{
+  "entities": {
+    "Batch": {
+      "title": "繁育批次",
+      "description": "记录兔场的一个繁育批次信息",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "唯一标识符" },
+        "name": { "type": "string", "description": "批次名称" },
+        "matingDate": { "type": "string", "description": "配种日期 (YYYY-MM-DD)" },
+        "createdAt": { "type": "number", "description": "创建时间戳" },
+        "uid": { "type": "string", "description": "所属用户ID" }
+      },
+      "required": ["id", "name", "matingDate", "createdAt", "uid"]
+    },
+    "Task": {
+      "title": "日程任务",
+      "description": "记录具体的养殖任务",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "唯一标识符" },
+        "batchId": { "type": "string", "description": "所属批次ID" },
+        "batchName": { "type": "string", "description": "所属批次名称" },
+        "title": { "type": "string", "description": "任务标题" },
+        "date": { "type": "string", "description": "执行日期 (YYYY-MM-DD)" },
+        "completed": { "type": "boolean", "description": "是否完成" },
+        "type": { "type": "string", "description": "任务类型" },
+        "cycle": { "type": "number", "description": "所属周期" },
+        "daysOffset": { "type": "number", "description": "相对于配种日的偏移天数" },
+        "uid": { "type": "string", "description": "所属用户ID" }
+      },
+      "required": ["id", "batchId", "title", "date", "completed", "uid"]
+    }
+  },
+  "firestore": {
+    "/batches/{batchId}": {
+      "schema": "Batch",
+      "description": "存储所有繁育批次"
+    },
+    "/tasks/{taskId}": {
+      "schema": "Task",
+      "description": "存储所有日程任务"
+    }
+  }
+}

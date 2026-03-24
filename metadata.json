@@ -1,0 +1,5 @@
+{
+  "name": "澳威兔场日程管理",
+  "description": "一款兔场管理软件，以常用的日程表为基础，自动生成配种、产仔、加光等繁育任务。",
+  "requestFramePermissions": []
+}
