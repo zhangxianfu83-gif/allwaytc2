@@ -168,6 +168,55 @@ function AppContent() {
   const [activeTab, setActiveTab] = useState<'calendar' | 'tasks' | 'batches' | 'settings'>('calendar');
   const [direction, setDirection] = useState(0);
   const [notificationPermission, setNotificationPermission] = useState<NotificationPermission>('default');
+  const [isExitModalOpen, setIsExitModalOpen] = useState(false);
+
+  const handleTabChange = (newTab: 'calendar' | 'tasks' | 'batches' | 'settings') => {
+    if (newTab === activeTab) return;
+    
+    if (newTab === 'calendar') {
+      history.back();
+    } else {
+      if (activeTab === 'calendar') {
+        history.pushState({ page: newTab, appInitialized: true }, '', '');
+      } else {
+        history.replaceState({ page: newTab, appInitialized: true }, '', '');
+      }
+      setActiveTab(newTab);
+    }
+  };
+
+  // History management for back button
+  // This is crucial for Android apps built with Capacitor to handle the hardware back button
+  useEffect(() => {
+    if (!history.state?.appInitialized) {
+      // Initialize state to handle exit confirmation
+      history.replaceState({ page: 'exit_confirm', appInitialized: true }, '', '');
+      history.pushState({ page: 'calendar', appInitialized: true }, '', '');
+    } else {
+      if (history.state.page && history.state.page !== 'exit_confirm') {
+        setActiveTab(history.state.page);
+      } else if (history.state.page === 'exit_confirm') {
+        history.pushState({ page: 'calendar', appInitialized: true }, '', '');
+        setActiveTab('calendar');
+      }
+    }
+
+    const handlePopState = (event: PopStateEvent) => {
+      const state = event.state;
+      if (state?.page === 'exit_confirm') {
+        // When user hits back button on the main screen, show exit confirmation
+        setIsExitModalOpen(true);
+        setActiveTab('calendar');
+      } else if (state?.page) {
+        // Navigate between tabs using back button
+        setActiveTab(state.page);
+        setIsExitModalOpen(false);
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
 
   // Auth listener
   useEffect(() => {
@@ -262,8 +311,15 @@ function AppContent() {
 
   const handleAddBatch = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
     if (!newBatchName || !newBatchDate) return;
     if (!user && !isTrueOffline) return;
+
+    const isDuplicate = batches.some(b => b.name === newBatchName && b.matingDate === newBatchDate);
+    if (isDuplicate) {
+      toast.error('该批次已存在，请勿重复添加');
+      return;
+    }
 
     const batchId = uuidv4();
     const newBatchData: Batch & { uid?: string } = {
@@ -300,54 +356,57 @@ function AppContent() {
     }
 
     try {
-      // Split tasks into chunks of 450 to stay well within the 500 limit
+      // Perceived performance: close modal and reset form immediately
+      setIsModalOpen(false);
+      const tempBatchName = newBatchName;
+      setNewBatchName('');
+      setNewBatchDate(format(new Date(), 'yyyy-MM-dd'));
+
+      // Split tasks into chunks of 450 to stay well within the Firestore 500-operation limit per batch
       const CHUNK_SIZE = 450;
-      const taskChunks = [];
-      for (let i = 0; i < newTasksData.length; i += CHUNK_SIZE) {
-        taskChunks.push(newTasksData.slice(i, i + CHUNK_SIZE));
-      }
+      const allDocs = [
+        { ref: doc(db, 'batches', batchId), data: newBatchData },
+        ...newTasksData.map(t => ({ ref: doc(db, 'tasks', t.id), data: t }))
+      ];
 
       const commitPromises = [];
-
-      // First batch includes the batch document
-      const firstBatch = writeBatch(db);
-      firstBatch.set(doc(db, 'batches', batchId), newBatchData);
-      if (taskChunks.length > 0) {
-        taskChunks[0].forEach(t => {
-          firstBatch.set(doc(db, 'tasks', t.id), t);
-        });
-      }
-      commitPromises.push(firstBatch.commit());
-
-      // Subsequent batches for the remaining tasks
-      for (let i = 1; i < taskChunks.length; i++) {
+      for (let i = 0; i < allDocs.length; i += CHUNK_SIZE) {
         const fbBatch = writeBatch(db);
-        taskChunks[i].forEach(t => {
-          fbBatch.set(doc(db, 'tasks', t.id), t);
+        const chunk = allDocs.slice(i, i + CHUNK_SIZE);
+        chunk.forEach(item => {
+          fbBatch.set(item.ref, item.data);
         });
         commitPromises.push(fbBatch.commit());
       }
 
-      Promise.all(commitPromises).catch(error => {
-        handleFirestoreError(error, OperationType.WRITE, 'batches/tasks');
-      });
+      Promise.all(commitPromises)
+        .then(() => {
+          toast.success(`繁育批次 "${tempBatchName}" 已创建`);
+        })
+        .catch(error => {
+          handleFirestoreError(error, OperationType.WRITE, 'batches/tasks');
+        })
+        .finally(() => {
+          setIsSubmitting(false);
+        });
 
-      // Close modal early to improve perceived performance on mobile
-      setIsModalOpen(false);
-      setNewBatchName('');
-      setNewBatchDate(format(new Date(), 'yyyy-MM-dd'));
-      toast.success('繁育批次已创建');
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, 'batches/tasks');
-    } finally {
       setIsSubmitting(false);
     }
   };
 
   const handleAddVaccine = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
     if (!vaccineStartDate) return;
     if (!user && !isTrueOffline) return;
+
+    const isDuplicate = batches.some(b => b.name === '兔瘟普免' && b.matingDate === vaccineStartDate);
+    if (isDuplicate) {
+      toast.error('该日期的免疫计划已存在，请勿重复添加');
+      return;
+    }
 
     const batchId = uuidv4();
     const newBatchData: Batch & { uid?: string } = {
@@ -360,35 +419,65 @@ function AppContent() {
 
     const newTasksData = generateVaccineTasks(newBatchData.id, newBatchData.name, vaccineStartDate).map(t => ({ ...t, uid: user?.uid }));
 
+    setIsSubmitting(true);
     if (isTrueOffline) {
       const updatedBatches = [...batches, newBatchData as Batch];
       const updatedTasks = [...tasks, ...newTasksData as Task[]];
       setBatches(updatedBatches);
       setTasks(updatedTasks);
-      localStorage.setItem('offline_batches', JSON.stringify(updatedBatches));
-      localStorage.setItem('offline_tasks', JSON.stringify(updatedTasks));
+      try {
+        localStorage.setItem('offline_batches', JSON.stringify(updatedBatches));
+        localStorage.setItem('offline_tasks', JSON.stringify(updatedTasks));
+      } catch (e) {
+        toast.error('本地存储空间不足，请清理旧数据');
+        setIsSubmitting(false);
+        return;
+      }
 
       setIsVaccineModalOpen(false);
       setVaccineStartDate(format(new Date(), 'yyyy-MM-dd'));
       toast.success('免疫计划已创建 (本地保存)');
+      setIsSubmitting(false);
       return;
     }
 
     try {
-      const fbBatch = writeBatch(db);
-      fbBatch.set(doc(db, 'batches', batchId), newBatchData);
-      newTasksData.forEach(t => {
-        fbBatch.set(doc(db, 'tasks', t.id), t);
-      });
-      fbBatch.commit().catch(error => {
-        handleFirestoreError(error, OperationType.WRITE, 'batches/tasks');
-      });
-
+      // Perceived performance: close modal immediately
       setIsVaccineModalOpen(false);
       setVaccineStartDate(format(new Date(), 'yyyy-MM-dd'));
-      toast.success('免疫计划已创建');
+
+      // Split tasks into chunks of 450 to stay well within the 500 limit
+      // Although vaccine tasks are currently few, this ensures scalability
+      const CHUNK_SIZE = 450;
+      const allDocs = [
+        { ref: doc(db, 'batches', batchId), data: newBatchData },
+        ...newTasksData.map(t => ({ ref: doc(db, 'tasks', t.id), data: t }))
+      ];
+
+      const commitPromises = [];
+      for (let i = 0; i < allDocs.length; i += CHUNK_SIZE) {
+        const fbBatch = writeBatch(db);
+        const chunk = allDocs.slice(i, i + CHUNK_SIZE);
+        chunk.forEach(item => {
+          fbBatch.set(item.ref, item.data);
+        });
+        commitPromises.push(fbBatch.commit());
+      }
+      
+      Promise.all(commitPromises)
+        .then(() => {
+          toast.success('免疫计划已创建');
+        })
+        .catch(error => {
+          handleFirestoreError(error, OperationType.WRITE, 'batches/tasks');
+        })
+        .finally(() => {
+          setIsSubmitting(false);
+        });
+
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, 'batches/tasks');
+      setIsSubmitting(false);
     }
   };
 
@@ -502,6 +591,7 @@ function AppContent() {
   };
 
   const confirmDeleteBatch = async () => {
+    if (isSubmitting) return;
     if (!batchToDelete) return;
     
     setIsSubmitting(true);
@@ -522,45 +612,44 @@ function AppContent() {
 
     if (user) {
       try {
+        // Perceived performance: close modal immediately
+        setIsDeleteModalOpen(false);
+        const tempBatchName = batchToDelete.name;
+
         const batchTasks = tasks.filter(t => t.batchId === batchToDelete.id || (!t.batchId && t.batchName === batchToDelete.name));
+        
+        // Split deletions into chunks of 450 to stay well within the Firestore 500-operation limit per batch
         const CHUNK_SIZE = 450;
-        const chunks = [];
         
-        // Include the batch document in the first chunk
-        const firstChunk = batchTasks.slice(0, CHUNK_SIZE - 1);
-        const remainingTasks = batchTasks.slice(CHUNK_SIZE - 1);
-        
-        for (let i = 0; i < remainingTasks.length; i += CHUNK_SIZE) {
-          chunks.push(remainingTasks.slice(i, i + CHUNK_SIZE));
-        }
+        const allRefs = [
+          doc(db, 'batches', batchToDelete.id),
+          ...batchTasks.map(t => doc(db, 'tasks', t.id))
+        ];
 
         const commitPromises = [];
-
-        // Delete batch and first set of tasks
-        const firstBatch = writeBatch(db);
-        firstBatch.delete(doc(db, 'batches', batchToDelete.id));
-        firstChunk.forEach(t => {
-          firstBatch.delete(doc(db, 'tasks', t.id));
-        });
-        commitPromises.push(firstBatch.commit());
-
-        // Delete remaining tasks in background chunks
-        for (const chunk of chunks) {
+        for (let i = 0; i < allRefs.length; i += CHUNK_SIZE) {
           const fbBatch = writeBatch(db);
-          chunk.forEach(t => {
-            fbBatch.delete(doc(db, 'tasks', t.id));
+          const chunk = allRefs.slice(i, i + CHUNK_SIZE);
+          chunk.forEach(ref => {
+            fbBatch.delete(ref);
           });
           commitPromises.push(fbBatch.commit());
         }
         
-        Promise.all(commitPromises).catch(error => {
-          handleFirestoreError(error, OperationType.DELETE, 'batches/tasks');
-        });
+        Promise.all(commitPromises)
+          .then(() => {
+            toast.success(`批次 "${tempBatchName}" 及相关任务已删除`);
+          })
+          .catch(error => {
+            handleFirestoreError(error, OperationType.DELETE, 'batches/tasks');
+          })
+          .finally(() => {
+            setBatchToDelete(null);
+            setIsSubmitting(false);
+          });
 
-        toast.success('批次及相关任务已删除');
       } catch (error) {
         handleFirestoreError(error, OperationType.DELETE, 'batches/tasks');
-      } finally {
         setIsDeleteModalOpen(false);
         setBatchToDelete(null);
         setIsSubmitting(false);
@@ -720,19 +809,17 @@ function AppContent() {
   const selectedDayTasks = groupTasks(rawSelectedDayTasks);
 
   const activeLitters = batches
-    .filter(b => !b.name.includes('全场'))
+    .filter(b => !b.name.includes('全场') && !b.name.includes('兔瘟') && !b.name.includes('普免') && !b.name.includes('免疫') && !b.name.includes('疫苗'))
     .flatMap(batch => {
     const mDate = startOfDay(new Date(batch.matingDate));
     const sDate = startOfDay(selectedDate);
     const litters = [];
     
     for (let i = 0; i < 10; i++) {
-      const cycleMatingDate = addDays(mDate, i * 42);
       const birthDate = addDays(mDate, i * 42 + 30);
       const age = differenceInDays(sDate, birthDate);
-      const daysSinceMating = differenceInDays(sDate, cycleMatingDate);
       
-      if (daysSinceMating >= 0 && age <= 70) {
+      if (age >= 0 && age <= 70) {
         litters.push({
           batchName: batch.name,
           birthDateStr: format(birthDate, 'M月d日'),
@@ -770,6 +857,7 @@ function AppContent() {
   }, [] as { batchName: string, birthDateStr: string, age: number }[]);
 
   const confirmImportData = async () => {
+    if (isSubmitting) return;
     if (importPendingData && user) {
       setIsSubmitting(true);
       try {
@@ -788,6 +876,7 @@ function AppContent() {
         newBatches.forEach((b: any) => operations.push({ type: 'set', collection: 'batches', id: b.id, data: { ...b, uid: user.uid } }));
         newTasks.forEach((t: any) => operations.push({ type: 'set', collection: 'tasks', id: t.id, data: { ...t, uid: user.uid } }));
 
+        // Split operations into chunks of 450 to stay well within the Firestore 500-operation limit per batch
         const CHUNK_SIZE = 450;
         const commitPromises = [];
         
@@ -913,7 +1002,7 @@ function AppContent() {
               className="w-full flex items-center justify-center gap-3 bg-white border border-stone-200 hover:bg-stone-50 text-stone-700 py-3.5 rounded-xl font-semibold transition-all shadow-sm opacity-60"
             >
               <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" className="w-5 h-5" alt="Google" />
-              使用 Google 账号登录 (需翻墙)
+              使用 Google 账号登录
             </button>
           </div>
 
@@ -995,60 +1084,60 @@ function AppContent() {
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 lg:py-8">
+      <main className="max-w-7xl mx-auto px-1 sm:px-6 lg:px-8 py-2 lg:py-8">
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           
           {/* Calendar Section */}
           <div className={`lg:col-span-2 bg-white rounded-2xl shadow-sm border border-stone-200 overflow-hidden ${activeTab !== 'calendar' ? 'hidden lg:block' : 'block'}`}>
-            <div className="p-4 lg:p-6 border-b border-stone-200 flex items-center justify-between">
-              <h2 className="text-base lg:text-lg font-semibold flex items-center gap-2">
-                <CalendarIcon size={20} className="text-stone-500" />
+            <div className="p-2 lg:p-6 border-b border-stone-200 flex items-center justify-between">
+              <h2 className="text-lg lg:text-xl font-bold flex items-center gap-2">
+                <CalendarIcon size={24} className="text-stone-500" />
                 {format(currentDate, 'yyyy年 M月', { locale: zhCN })}
               </h2>
               <div className="flex items-center gap-1 lg:gap-2">
                 {notificationPermission !== 'granted' && (
                   <button 
                     onClick={requestNotificationPermission}
-                    className="p-1.5 lg:p-2 text-stone-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-full transition-all"
+                    className="p-2 lg:p-2 text-stone-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-full transition-all"
                     title="开启通知提醒"
                   >
                     <div className="relative">
-                      <CalendarIcon size={20} />
-                      <div className="absolute -top-1 -right-1 w-2 h-2 bg-red-500 rounded-full border-2 border-white"></div>
+                      <CalendarIcon size={24} />
+                      <div className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-red-500 rounded-full border-2 border-white"></div>
                     </div>
                   </button>
                 )}
                 <button 
                   onClick={prevMonth}
-                  className="p-1.5 lg:p-2 hover:bg-stone-100 rounded-full transition-colors"
+                  className="p-2 lg:p-2 hover:bg-stone-100 rounded-full transition-colors"
                 >
-                  <ChevronLeft size={20} />
+                  <ChevronLeft size={24} />
                 </button>
                 <button 
                   onClick={goToToday}
-                  className="px-2 lg:px-3 py-1 text-xs lg:text-sm font-medium hover:bg-stone-100 rounded-full transition-colors"
+                  className="px-3 lg:px-3 py-1.5 text-sm lg:text-base font-bold hover:bg-stone-100 rounded-full transition-colors"
                 >
                   今天
                 </button>
                 <button 
                   onClick={nextMonth}
-                  className="p-1.5 lg:p-2 hover:bg-stone-100 rounded-full transition-colors"
+                  className="p-2 lg:p-2 hover:bg-stone-100 rounded-full transition-colors"
                 >
-                  <ChevronRight size={20} />
+                  <ChevronRight size={24} />
                 </button>
               </div>
             </div>
             
             <div className="p-2 lg:p-6 relative">
-              <div className="grid grid-cols-7 gap-px mb-2">
+              <div className="grid grid-cols-7 gap-1 mb-1 lg:mb-2">
                 {['一', '二', '三', '四', '五', '六', '日'].map(day => (
-                  <div key={day} className="text-center text-[10px] lg:text-sm font-medium text-stone-500 py-1 lg:py-2">
+                  <div key={day} className="text-center text-xs lg:text-sm font-bold text-stone-600 py-1 lg:py-2">
                     {day}
                   </div>
                 ))}
               </div>
               
-              <div className="overflow-hidden relative min-h-[350px] lg:min-h-[500px]">
+              <div className="overflow-hidden relative min-h-[400px] lg:min-h-[500px]">
                 <AnimatePresence initial={false} mode="popLayout" custom={direction}>
                   <motion.div
                     key={currentDate.toISOString()}
@@ -1093,22 +1182,22 @@ function AppContent() {
                           key={day.toString()}
                           onClick={() => {
                             setSelectedDate(day);
-                            if (window.innerWidth < 1024) setActiveTab('tasks');
+                            if (window.innerWidth < 1024) handleTabChange('tasks');
                           }}
                           className={`
-                            min-h-[60px] lg:min-h-[100px] p-1 lg:p-2 rounded-lg lg:rounded-xl border transition-all cursor-pointer flex flex-col
+                            min-h-[80px] lg:min-h-[100px] p-1 lg:p-2 rounded-md lg:rounded-xl border transition-all cursor-pointer flex flex-col
                             ${isSelected ? 'border-emerald-500 ring-1 ring-emerald-500 bg-emerald-50/30' : 'border-stone-200 hover:border-emerald-300 hover:bg-stone-50'}
                           `}
                         >
                           <div className="flex justify-between items-start mb-0.5 lg:mb-1">
                             <span className={`
-                              text-[10px] lg:text-sm font-medium w-5 h-5 lg:w-7 lg:h-7 flex items-center justify-center rounded-full
+                              text-sm lg:text-base font-bold w-6 h-6 lg:w-7 lg:h-7 flex items-center justify-center rounded-full
                               ${isToday ? 'bg-emerald-600 text-white' : 'text-stone-700'}
                             `}>
                               {format(day, 'd')}
                             </span>
                             {dayTasks.length > 0 && (
-                              <span className="text-[8px] lg:text-xs font-medium text-stone-500 bg-stone-100 px-1 lg:px-1.5 py-0.5 rounded-md">
+                              <span className="text-xs lg:text-xs font-bold text-stone-600 bg-stone-100 px-1.5 lg:px-1.5 py-0.5 rounded-md">
                                 {dayTasks.length}
                               </span>
                             )}
@@ -1122,13 +1211,13 @@ function AppContent() {
                               ).slice(0, dayTasks.length > 4 ? 3 : 4).map(task => (
                                 <div 
                                   key={task.id} 
-                                  className={`text-[7px] truncate px-0.5 rounded border ${TASK_COLORS[task.type]} ${task.completed ? 'opacity-50' : ''}`}
+                                  className={`text-[8px] leading-tight truncate px-0 py-px rounded border tracking-tighter ${TASK_COLORS[task.type]} ${task.completed ? 'opacity-50' : ''}`}
                                 >
-                                  {task.batchName === getShortTitle(task.title) ? task.batchName : `${task.batchName} ${getShortTitle(task.title)}`}
+                                  {task.batchName === '自定义' ? getShortTitle(task.title) : (task.batchName === getShortTitle(task.title) ? task.batchName : `${task.batchName} ${getShortTitle(task.title)}`)}
                                 </div>
                               ))}
                               {dayTasks.length > 4 && (
-                                <div className="text-[6px] text-stone-400 text-center">
+                                <div className="text-[8px] text-stone-500 text-center font-medium tracking-tighter">
                                   +{dayTasks.length - (dayTasks.length > 4 ? dayTasks.filter(t => !t.title.includes('月子餐')).slice(0, 3).length : 4)}
                                 </div>
                               )}
@@ -1138,14 +1227,14 @@ function AppContent() {
                               {dayTasks.slice(0, dayTasks.length > 4 ? 3 : 4).map(task => (
                                 <div 
                                   key={task.id} 
-                                  className={`text-[10px] truncate px-1.5 py-0.5 rounded border ${TASK_COLORS[task.type]} ${task.completed ? 'opacity-50 line-through' : ''}`}
+                                  className={`text-[10px] truncate px-1 py-0.5 rounded border tracking-tight ${TASK_COLORS[task.type]} ${task.completed ? 'opacity-50 line-through' : ''}`}
                                   title={`${task.batchName}: ${task.title}`}
                                 >
-                                  {task.batchName === getShortTitle(task.title) ? task.batchName : `${task.batchName} ${getShortTitle(task.title)}`}
+                                  {task.batchName === '自定义' ? getShortTitle(task.title) : (task.batchName === getShortTitle(task.title) ? task.batchName : `${task.batchName} ${getShortTitle(task.title)}`)}
                                 </div>
                               ))}
                               {dayTasks.length > 4 && (
-                                <div className="text-[10px] text-stone-500 pl-1">
+                                <div className="text-[10px] text-stone-500 pl-1 tracking-tight">
                                   +{dayTasks.length - 3} 更多
                                 </div>
                               )}
@@ -1163,39 +1252,39 @@ function AppContent() {
           {/* Sidebar / Task List */}
           <div className={`space-y-6 ${activeTab === 'calendar' ? 'hidden lg:block' : activeTab === 'tasks' ? 'block' : 'hidden lg:block'}`}>
             <div className="bg-white rounded-2xl shadow-sm border border-stone-200 overflow-hidden flex flex-col h-[calc(100vh-12rem)] lg:h-[600px]">
-              <div className="p-4 border-b border-stone-200 bg-stone-50/50">
-                <h2 className="text-base lg:text-lg font-semibold flex items-center gap-2">
-                  <ListTodo size={20} className="text-emerald-600" />
+              <div className="p-3 lg:p-4 border-b border-stone-200 bg-stone-50/50">
+                <h2 className="text-lg lg:text-xl font-bold flex items-center gap-2">
+                  <ListTodo size={24} className="text-emerald-600" />
                   <span>{format(selectedDate, 'M月d日', { locale: zhCN })} 任务清单</span>
-                  <span className="text-xs lg:text-sm font-normal text-stone-500 ml-1">
+                  <span className="text-sm lg:text-base font-medium text-stone-600 ml-1">
                     (农历{Solar.fromDate(selectedDate).getLunar().getMonthInChinese()}月{Solar.fromDate(selectedDate).getLunar().getDayInChinese()})
                   </span>
                 </h2>
-                <p className="text-xs lg:text-sm text-stone-500 mt-1">
+                <p className="text-sm lg:text-base text-stone-600 mt-1">
                   {selectedDayTasks.length === 0 ? '今天没有安排任务' : `共 ${selectedDayTasks.length} 项任务，已完成 ${selectedDayTasks.filter(t => t.completed).length} 项`}
                 </p>
               </div>
               
               {activeLitters.length > 0 && (
-                <div className="px-4 pt-4">
-                  <h3 className="text-[10px] lg:text-xs font-medium text-stone-500 mb-2 uppercase tracking-wider">当前小兔批次</h3>
-                  <div className="flex flex-wrap gap-2">
+                <div className="px-3 pt-3 lg:px-4 lg:pt-4">
+                  <h3 className="text-xs lg:text-sm font-bold text-stone-600 mb-1.5 uppercase tracking-wider">当前小兔批次</h3>
+                  <div className="flex flex-wrap gap-1.5 lg:gap-2">
                     {activeLitters.map((litter, idx) => (
-                      <div key={idx} className="bg-emerald-50 border border-emerald-200 text-emerald-700 px-2 py-1 lg:px-2.5 lg:py-1.5 rounded-lg text-[10px] lg:text-xs flex items-center gap-1 lg:gap-1.5">
-                        <Rabbit size={14} />
+                      <div key={idx} className="bg-emerald-50 border border-emerald-200 text-emerald-700 px-3 py-1.5 lg:px-3 lg:py-2 rounded-lg text-xs lg:text-sm flex items-center gap-1.5 lg:gap-2">
+                        <Rabbit size={16} />
                         <span>{litter.batchName} ({litter.birthDateStr})</span>
-                        <span className="font-bold">{litter.age >= 0 ? `${litter.age}日龄` : '预产期'}</span>
+                        <span className="font-bold">{litter.age}日龄</span>
                       </div>
                     ))}
                   </div>
                 </div>
               )}
 
-              <div className="p-4 flex-1 overflow-y-auto space-y-3">
+              <div className="p-3 lg:p-4 flex-1 overflow-y-auto space-y-2">
                 {selectedDayTasks.length === 0 ? (
                   <div className="h-full flex flex-col items-center justify-center text-stone-400 space-y-3">
                     <Rabbit size={48} className="opacity-20" />
-                    <p className="text-sm">今天可以休息一下</p>
+                    <p className="text-base">今天可以休息一下</p>
                   </div>
                 ) : (
                   selectedDayTasks.map(task => (
@@ -1210,22 +1299,22 @@ function AppContent() {
                         <button 
                           onClick={() => toggleTaskCompletion(task.ids, task.completed)}
                           className={`
-                            mt-0.5 w-5 h-5 lg:w-6 lg:h-6 rounded-full border flex items-center justify-center flex-shrink-0 transition-colors
+                            mt-0.5 w-6 h-6 lg:w-7 lg:h-7 rounded-full border flex items-center justify-center flex-shrink-0 transition-colors
                             ${task.completed ? 'bg-emerald-500 border-emerald-500 text-white' : 'border-stone-300 hover:border-emerald-500'}
                           `}
                         >
-                          {task.completed && <svg viewBox="0 0 14 14" fill="none" className="w-3 h-3 lg:w-4 lg:h-4"><path d="M3 7.5L5.5 10L11 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>}
+                          {task.completed && <svg viewBox="0 0 14 14" fill="none" className="w-4 h-4 lg:w-5 lg:h-5"><path d="M3 7.5L5.5 10L11 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>}
                         </button>
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2 mb-1">
-                            <span className="font-medium text-sm lg:text-base text-stone-900 truncate block">
+                            <span className="font-bold text-base lg:text-lg text-stone-900 truncate block">
                               {task.batchName}
                             </span>
-                            <span className={`text-[10px] lg:text-xs px-2 py-0.5 rounded-full border font-normal ${TASK_COLORS[task.type]}`}>
+                            <span className={`text-xs lg:text-sm px-2 py-0.5 rounded-full border font-medium ${TASK_COLORS[task.type]}`}>
                               {getShortTitle(task.title)}
                             </span>
                           </div>
-                          <p className={`text-xs lg:text-sm font-medium ${task.completed ? 'line-through text-stone-400' : 'text-stone-600'}`}>
+                          <p className={`text-sm lg:text-base font-medium ${task.completed ? 'line-through text-stone-400' : 'text-stone-700'}`}>
                             {task.title}
                           </p>
                         </div>
@@ -1273,13 +1362,13 @@ function AppContent() {
               <div className="flex items-center gap-2">
                 <button 
                   onClick={() => setIsVaccineModalOpen(true)}
-                  className="lg:hidden text-xs text-cyan-600 font-medium"
+                  className="lg:hidden px-3 py-1.5 bg-cyan-50 text-cyan-600 rounded-lg text-xs font-bold border border-cyan-100"
                 >
                   免疫计划
                 </button>
                 <button 
                   onClick={() => setIsModalOpen(true)}
-                  className="lg:hidden text-xs text-emerald-600 font-medium"
+                  className="lg:hidden px-3 py-1.5 bg-emerald-50 text-emerald-600 rounded-lg text-xs font-bold border border-emerald-100"
                 >
                   新增批次
                 </button>
@@ -1294,7 +1383,7 @@ function AppContent() {
                       <div>
                         <div className="font-medium text-sm text-stone-800">{batch.name}</div>
                         <div className="text-xs text-stone-500 mt-0.5">
-                          {batch.name.includes('免疫') || batch.name.includes('疫苗') ? '免疫' : '配种'}: {batch.matingDate}
+                          {batch.name.includes('免疫') || batch.name.includes('疫苗') || batch.name.includes('普免') || batch.name.includes('兔瘟') ? '免疫' : '配种'}: {batch.matingDate}
                         </div>
                       </div>
                       <button 
@@ -1355,7 +1444,7 @@ function AppContent() {
 
                 <div className="pt-4 border-t border-stone-100">
                   <p className="text-[10px] text-stone-400 text-center">
-                    版本: 1.0.2 | 澳威兔场日程管理
+                    版本: 1.0.2 | 澳威兔场日程管理 | 制作人：张现富13355491366
                   </p>
                 </div>
               </div>
@@ -1365,34 +1454,34 @@ function AppContent() {
       </main>
 
       {/* Mobile Bottom Navigation */}
-      <nav className="lg:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-stone-200 h-16 flex items-center justify-around z-40 px-4">
+      <nav className="lg:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-stone-200 h-16 flex items-center justify-around z-40 px-2">
         <button 
-          onClick={() => setActiveTab('calendar')}
-          className={`flex flex-col items-center gap-1 ${activeTab === 'calendar' ? 'text-emerald-600' : 'text-stone-400'}`}
+          onClick={() => handleTabChange('calendar')}
+          className={`flex flex-col items-center gap-1 p-2 ${activeTab === 'calendar' ? 'text-emerald-600' : 'text-stone-400'}`}
         >
-          <CalendarIcon size={20} />
-          <span className="text-[10px] font-medium">日历</span>
+          <CalendarIcon size={24} />
+          <span className="text-xs font-bold">日历</span>
         </button>
         <button 
-          onClick={() => setActiveTab('tasks')}
-          className={`flex flex-col items-center gap-1 ${activeTab === 'tasks' ? 'text-emerald-600' : 'text-stone-400'}`}
+          onClick={() => handleTabChange('tasks')}
+          className={`flex flex-col items-center gap-1 p-2 ${activeTab === 'tasks' ? 'text-emerald-600' : 'text-stone-400'}`}
         >
-          <ListTodo size={20} />
-          <span className="text-[10px] font-medium">任务</span>
+          <ListTodo size={24} />
+          <span className="text-xs font-bold">任务</span>
         </button>
         <button 
-          onClick={() => setActiveTab('batches')}
-          className={`flex flex-col items-center gap-1 ${activeTab === 'batches' ? 'text-emerald-600' : 'text-stone-400'}`}
+          onClick={() => handleTabChange('batches')}
+          className={`flex flex-col items-center gap-1 p-2 ${activeTab === 'batches' ? 'text-emerald-600' : 'text-stone-400'}`}
         >
-          <Rabbit size={20} />
-          <span className="text-[10px] font-medium">批次</span>
+          <Rabbit size={24} />
+          <span className="text-xs font-bold">批次</span>
         </button>
         <button 
-          onClick={() => setActiveTab('settings')}
-          className={`flex flex-col items-center gap-1 ${activeTab === 'settings' ? 'text-emerald-600' : 'text-stone-400'}`}
+          onClick={() => handleTabChange('settings')}
+          className={`flex flex-col items-center gap-1 p-2 ${activeTab === 'settings' ? 'text-emerald-600' : 'text-stone-400'}`}
         >
-          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
-          <span className="text-[10px] font-medium">设置</span>
+          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+          <span className="text-xs font-bold">设置</span>
         </button>
       </nav>
 
@@ -1435,9 +1524,10 @@ function AppContent() {
                 </button>
                 <button 
                   type="submit"
-                  className="flex-1 px-4 py-2.5 bg-cyan-600 text-white rounded-lg font-medium hover:bg-cyan-700 transition-colors shadow-sm text-sm lg:text-base"
+                  disabled={isSubmitting}
+                  className={`flex-1 px-4 py-2.5 bg-cyan-600 text-white rounded-lg font-medium hover:bg-cyan-700 transition-colors shadow-sm text-sm lg:text-base ${isSubmitting ? 'opacity-70 cursor-not-allowed' : ''}`}
                 >
-                  生成计划
+                  {isSubmitting ? '生成中...' : '生成计划'}
                 </button>
               </div>
             </form>
@@ -1504,7 +1594,7 @@ function AppContent() {
                   <li>仔兔 18-25 日龄：母兔饲喂月子餐60g</li>
                   <li>仔兔 23 日龄（第53天）：撤产箱挡板</li>
                   <li>仔兔 28 日龄（第58天）：撤产箱</li>
-                  <li>仔兔 30 日龄（第60天）：兔瘟普免</li>
+                  <li>仔兔 30 日龄（第60天）：兔瘟免疫</li>
                   <li>仔兔 35 日龄（第65天）：分窝</li>
                   <li>仔兔 35-37 日龄：分窝起连续3天呼吸道预防投药</li>
                 </ul>
@@ -1596,6 +1686,42 @@ function AppContent() {
                   className="flex-1 px-4 py-2.5 bg-amber-600 text-white rounded-lg font-medium hover:bg-amber-700 transition-colors shadow-sm"
                 >
                   确认覆盖
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Exit Confirmation Modal */}
+      {isExitModalOpen && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm overflow-hidden animate-in fade-in zoom-in duration-200">
+            <div className="p-5 lg:p-6">
+              <div className="w-12 h-12 rounded-full bg-amber-100 flex items-center justify-center mb-4 mx-auto">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-amber-600"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>
+              </div>
+              <h3 className="text-lg font-bold text-stone-800 mb-2 text-center">确认退出程序？</h3>
+              <p className="text-sm text-stone-500 mb-6 text-center">
+                您确定要退出当前程序吗？
+              </p>
+              <div className="flex gap-3">
+                <button 
+                  onClick={() => {
+                    setIsExitModalOpen(false);
+                    history.pushState({ page: 'calendar', appInitialized: true }, '', '');
+                  }}
+                  className="flex-1 px-4 py-2.5 border border-stone-200 text-stone-600 rounded-lg font-medium hover:bg-stone-50 transition-colors"
+                >
+                  取消
+                </button>
+                <button 
+                  onClick={() => {
+                    setIsExitModalOpen(false);
+                    history.back();
+                  }}
+                  className="flex-1 px-4 py-2.5 bg-amber-600 text-white rounded-lg font-medium hover:bg-amber-700 transition-colors shadow-sm"
+                >
+                  确认退出
                 </button>
               </div>
             </div>

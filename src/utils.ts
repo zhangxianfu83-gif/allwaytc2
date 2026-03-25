@@ -1,23 +1,31 @@
 import { addDays, format } from 'date-fns';
 import { Batch, Task } from './types';
 
+/**
+ * 将长任务标题缩短为适合日历显示的短标题
+ * @param title 原始任务标题
+ * @returns 缩短后的标题
+ */
 export function getShortTitle(title: string): string {
   if (title.includes('母兔饲喂月子餐')) {
     const match = title.match(/(\d+)g/);
-    return match ? `${match[1]}g母月子` : '母月子';
+    return match ? `${match[1]}g母月` : '母月';
   }
   if (title.includes('公兔饲喂月子餐')) {
     const match = title.match(/(\d+)g/);
-    return match ? `${match[1]}g公月子` : '公月子';
+    return match ? `${match[1]}g公月` : '公月';
   }
   if (title.includes('配种')) return '配种';
+  if (title.includes('加光半天')) return '加光半天';
   if (title.includes('加光')) return '加光';
   if (title.includes('补光')) return '补光';
+  if (title.includes('仔兔兔瘟')) return '仔兔免疫';
   if (title.includes('兔瘟普免')) return '兔瘟普免';
   if (title.includes('疫苗')) return '疫苗';
   if (title.includes('小产')) return '小产';
   if (title.includes('大产')) return '大产';
   if (title.includes('催产')) return '催产';
+  if (title.includes('摸胎')) return '摸胎';
   if (title.includes('匀崽')) return '匀崽';
   if (title.includes('二次撒窝')) return '二次撒窝';
   if (title.includes('开产箱门') || title.includes('打开产箱门')) return '开门';
@@ -34,12 +42,17 @@ export function getShortTitle(title: string): string {
   return title;
 }
 
+/**
+ * 为一个繁育批次生成完整的日程任务（基于42天繁育周期）
+ * @param batch 批次信息
+ * @returns 生成的任务列表
+ */
 export function generateTasksForBatch(batch: Batch): Task[] {
   const tasks: Task[] = [];
   const mDate = new Date(batch.matingDate);
   
   const addTask = (title: string, daysOffset: number, type: Task['type'], cycle: number) => {
-    // Generate a unique ID by including the title to avoid collisions when multiple tasks of the same type occur on the same day
+    // 生成唯一ID，包含标题以防止同一天同类型的多个任务冲突
     tasks.push({
       id: `${batch.id}-${type}-${daysOffset}-c${cycle}-${title}`,
       batchId: batch.id,
@@ -53,10 +66,20 @@ export function generateTasksForBatch(batch: Batch): Task[] {
     });
   };
 
-  const CYCLES = 18; // 2 years ≈ 18 cycles of 42 days
+  // 生成18个周期（约2年），每个周期42天
+  const CYCLES = 18; 
 
   for (let cycle = 0; cycle < CYCLES; cycle++) {
     const cycleOffset = cycle * 42;
+    const currentMatingDate = addDays(mDate, cycleOffset);
+    const m = currentMatingDate.getMonth();
+    const d = currentMatingDate.getDate();
+    
+    // 每年11月15至次年3月15日之间配种的，需要提前加光半天
+    const isWinter = (m === 10 && d >= 15) || m === 11 || m === 0 || m === 1 || (m === 2 && d <= 15);
+    if (isWinter) {
+      addTask('冬季提前加光半天14-22点（第0天）', cycleOffset - 7, 'light', cycle);
+    }
 
     // 配种前48小时（前2天），单只不带仔母兔注射氯前列醇钠0.5ml
     addTask('注射氯前列醇钠0.5ml (单只不带仔母兔)', cycleOffset - 2, 'medicine', cycle);
@@ -80,8 +103,15 @@ export function generateTasksForBatch(batch: Batch): Task[] {
       addTask('加光催情6-22点（第8天）', cycleOffset + 1, 'light', cycle);
       addTask('加光催情6-22点（第9天）', cycleOffset + 2, 'light', cycle);
       addTask('加光催情6-17点（第10天）', cycleOffset + 3, 'light', cycle);
+      
+      // 配种后第12天摸胎
+      addTask('摸胎 (孕12天)', cycleOffset + 12, 'check', cycle);
     } else {
       addTask('再次配种 (仔兔12日龄)', cycleOffset + 0, 'mating', cycle);
+      
+      // 配种后第12天摸胎
+      addTask('摸胎 (孕12天)', cycleOffset + 12, 'check', cycle);
+      
       // 注意：后续轮次的配种前后加光，已经完美包含在上一轮的“仔兔6-15日龄加光”中
       // (上一轮仔兔12日龄 = 本轮配种日，仔兔6-15日龄 = 配种前6天到配种后3天)
     }
@@ -176,8 +206,8 @@ export function generateTasksForBatch(batch: Batch): Task[] {
     // 仔兔28日龄撤产箱 (31 + 28 - 1 = 58)
     addTask('撤产箱 (仔兔28日龄)', cycleOffset + 58, 'box', cycle);
     
-    // 仔兔30日龄兔瘟普免 (31 + 30 - 1 = 60)
-    addTask('仔兔兔瘟普免 (30日龄)', cycleOffset + 60, 'vaccine', cycle);
+    // 仔兔30日龄兔瘟免疫 (31 + 30 - 1 = 60)
+    addTask('仔兔兔瘟免疫 (30日龄)', cycleOffset + 60, 'vaccine', cycle);
 
     // 仔兔35日龄分窝 (31 + 35 - 1 = 65)
     addTask('仔兔分窝 (35日龄)', cycleOffset + 65, 'weaning', cycle);
@@ -191,13 +221,20 @@ export function generateTasksForBatch(batch: Batch): Task[] {
   return tasks;
 }
 
+/**
+ * 生成母兔疫苗接种计划（兔瘟普免，每84天一次）
+ * @param batchId 关联的批次ID
+ * @param batchName 关联的批次名称
+ * @param startDate 开始日期
+ * @returns 生成的任务列表
+ */
 export function generateVaccineTasks(batchId: string, batchName: string, startDate: string): Task[] {
   const tasks: Task[] = [];
   const baseDate = new Date(startDate);
 
-  // Generate for the next 20 cycles (about 4.6 years)
+  // 生成未来20个周期（约4.6年）
   for (let i = 0; i < 20; i++) {
-    const daysOffset = i * 84; // 42 days * 2
+    const daysOffset = i * 84; // 每84天一次
     const taskDate = format(addDays(baseDate, daysOffset), 'yyyy-MM-dd');
     
     tasks.push({
@@ -210,7 +247,7 @@ export function generateVaccineTasks(batchId: string, batchName: string, startDa
       type: 'vaccine'
     });
 
-    // On the 20th cycle, add a reminder to manually add more vaccine plans
+    // 在第20个周期添加提醒，以便用户手动新增下一阶段计划
     if (i === 19) {
       tasks.push({
         id: `${batchId}-vaccine-reminder`,

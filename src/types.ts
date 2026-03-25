@@ -1,4 +1,4 @@
-export type TaskType = 'mating' | 'light' | 'delivery_early' | 'delivery_main' | 'delivery_induce' | 'medicine' | 'vaccine' | 'weaning' | 'box' | 'custom';
+export type TaskType = 'mating' | 'light' | 'delivery_early' | 'delivery_main' | 'delivery_induce' | 'medicine' | 'vaccine' | 'weaning' | 'box' | 'custom' | 'check';
 
 export interface Batch {
   id: string;
@@ -32,4 +32,5 @@ export const TASK_COLORS: Record<TaskType, string> = {
   weaning: 'bg-orange-100 text-orange-800 border-orange-200',
   box: 'bg-amber-100 text-amber-800 border-amber-200',
   custom: 'bg-gray-100 text-gray-800 border-gray-200',
+  check: 'bg-teal-100 text-teal-800 border-teal-200',
 };
